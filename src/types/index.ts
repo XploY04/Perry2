@@ -22,5 +22,25 @@ export const SBOMResult = z.object({
   }),
 });
 
+// Chaos Test types
+export interface ChaosTestRequest {
+  githubUrl: string;
+}
+
+export interface ChaosTestResult {
+  success: boolean;
+  message?: string;
+  error?: string;
+  details?: string;
+  chaosType?: string;
+  duration?: number;
+  targetDeployment?: string;
+  targetNamespace?: string;
+  repository?: string;
+  verdict?: string;
+  failStep?: string;
+  experimentStatus?: string;
+}
+
 export type ContainerAnalysisRequest = z.infer<typeof ContainerAnalysisRequest>;
 export type SBOMResult = z.infer<typeof SBOMResult>;

@@ -1,13 +1,22 @@
-import express from 'express';
-import type { Request, Response } from 'express';
-import { ContainerAnalysisRequest, SBOMResult } from './types';
+import express, { Request, Response, RequestHandler } from 'express';
+import { ContainerAnalysisRequest, SBOMResult, ChaosTestRequest, ChaosTestResult } from './types';
 import { DockerService } from './services/docker';
 import { KubernetesService } from './services/kubernetes';
+import { 
+  cloneRepository, 
+  setupKubernetesCluster, 
+  deployApplication, 
+  setupLitmusChaos, 
+  findTargetDeployment, 
+  runChaosExperiment 
+} from './services/chaos';
 import { v4 as uuidv4 } from 'uuid';
 import bodyParser from 'body-parser';
 import fs from 'fs/promises';
 import path from 'path';
+import { join } from 'path';
 import os from 'os';
+import { tmpdir } from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 const execAsync = promisify(exec);
@@ -23,12 +32,12 @@ const dockerService = new DockerService();
 const k8sService = new KubernetesService();
 
 // Health check endpoint
-app.get('/health', (_req: Request, res: Response) => {
+app.get('/health', ((_req: Request, res: Response) => {
   res.json({ status: 'ok' });
-});
+}) as RequestHandler);
 
 // Main analysis endpoint
-app.post('/analyze', async (req: Request, res: Response) => {
+app.post('/analyze', (async (req: Request, res: Response) => {
   let image: string = '';
   let jobId: string = '';
   let sbomPath: string = '';
@@ -58,10 +67,23 @@ app.post('/analyze', async (req: Request, res: Response) => {
     res.type('application/json').send(grypeOutput);
   } catch (error) {
     console.error('Analysis failed:', error);
-    res.status(500).json({ 
-      error: 'Analysis failed', 
-      details: error instanceof Error ? error.message : 'Unknown error'
-    });
+    
+    // Check for Docker permission errors
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes("permission denied") && errorMessage.includes("docker.sock")) {
+      res.status(500).json({ 
+        error: 'Docker permission denied', 
+        details: 'This application requires Docker permissions. Please try one of these solutions:\n' +
+                 '1. Add your user to the docker group: sudo usermod -aG docker $USER\n' +
+                 '2. Log out and log back in, or run: newgrp docker\n' +
+                 '3. Start the application with sudo (not recommended for production)'
+      });
+    } else {
+      res.status(500).json({ 
+        error: 'Analysis failed', 
+        details: errorMessage
+      });
+    }
   } finally {
     // Cleanup resources
     if (image) {
@@ -86,7 +108,108 @@ app.post('/analyze', async (req: Request, res: Response) => {
       }
     }
   }
-});
+}) as RequestHandler);
+
+// Chaos test endpoint
+app.post('/chaos-test', (async (req: Request<any, any, ChaosTestRequest>, res: Response) => {
+  try {
+    const { githubUrl } = req.body;
+
+    if (!githubUrl) {
+      return res.status(400).json({
+        success: false,
+        error: "GitHub URL is required"
+      });
+    }
+
+    console.log(`Starting chaos test for repo: ${githubUrl}`);
+
+    try {
+      // 1. Clone the GitHub repository
+      const { repoDir, timestamp } = await cloneRepository(githubUrl);
+
+      // 2. Create a Kind cluster if it doesn't exist
+      await setupKubernetesCluster();
+
+      // 3. Apply Kubernetes manifests from the repo
+      await deployApplication(repoDir);
+
+      // 4. Install LitmusChaos if not already installed
+      await setupLitmusChaos();
+
+      // 5. Get the first deployment to target for chaos
+      const { targetDeployment, targetNamespace } = await findTargetDeployment();
+
+      // 6. Run pod-delete chaos experiment
+      const chaosManifest = join(tmpdir(), `chaos-manifest-${timestamp}.yaml`);
+      const chaosType = "pod-delete";
+      const duration = 30;
+
+      try {
+        const resultsJson = await runChaosExperiment({
+          targetDeployment,
+          targetNamespace,
+          chaosType,
+          duration,
+          manifestPath: chaosManifest
+        });
+
+        // 7. Return results
+        res.json({
+          success: true,
+          message: "Chaos test completed successfully",
+          chaosType,
+          duration,
+          targetDeployment,
+          targetNamespace,
+          repository: githubUrl,
+          verdict: resultsJson.status?.verdict || "Awaited",
+          failStep: resultsJson.status?.failStep || "None",
+          experimentStatus: "Completed"
+        });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          error: "Error during chaos testing",
+          details: error instanceof Error ? error.toString() : String(error),
+          chaosType,
+          targetDeployment,
+          targetNamespace,
+          repository: githubUrl
+        });
+      }
+    } catch (error) {
+      // Handle specific errors from different stages
+      let statusCode = 500;
+      let errorMessage = "Unexpected error during chaos test";
+
+      if (error instanceof Error) {
+        if (error.message.includes("No Kubernetes manifest files")) {
+          statusCode = 400;
+          errorMessage = error.message;
+        } else if (error.message.includes("No deployments found")) {
+          statusCode = 400;
+          errorMessage = error.message;
+        } else if (error.message.includes("Failed to clone repository")) {
+          errorMessage = "Failed to clone repository";
+        }
+      }
+
+      return res.status(statusCode).json({
+        success: false,
+        error: errorMessage,
+        details: error instanceof Error ? error.toString() : String(error)
+      });
+    }
+  } catch (error) {
+    console.error("Unexpected error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Unexpected error occurred",
+      details: error instanceof Error ? error.toString() : String(error)
+    });
+  }
+}) as RequestHandler);
 
 // Start server
 const PORT = process.env.PORT || 3000;
