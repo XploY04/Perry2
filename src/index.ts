@@ -142,7 +142,7 @@ app.post("/chaos-test", (async (
     const {
       githubUrl,
       chaosType = "node-io-stress", // Default to pod-delete if not specified
-      duration = 3000, // Default to 30 seconds
+      duration = 30, // Default to 30 seconds
       targetNamespace,
       targetDeployment,
       fillPercentage = 80, // Default disk fill percentage
