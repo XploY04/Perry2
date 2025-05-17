@@ -6,16 +6,21 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node dist/index.js",
     "build": "tsc -b",
-    "dev": "npm run build && npm run start"
+    "dev": "npm run build && npm run start",
+    "chaos": "node scripts/chaos-test.js",
+    "chaos-recovery": "node scripts/chaos-recovery.js",
+    "test-node-io-stress": "node scripts/test-node-io-stress.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@types/js-yaml": "^4.0.9",
     "body-parser": "^2.2.0",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
+    "js-yaml": "^4.1.0",
     "typescript": "^5.8.3",
     "uuid": "^11.1.0",
     "zod": "^3.24.4"

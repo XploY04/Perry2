@@ -25,6 +25,14 @@ export const SBOMResult = z.object({
 // Chaos Test types
 export interface ChaosTestRequest {
   githubUrl: string;
+  chaosType?: string;
+  duration?: number;
+  targetNamespace?: string;
+  targetDeployment?: string;
+  fillPercentage?: number;        // For disk-fill
+  ioPercentage?: number;          // For io-stress
+  networkLatency?: number;        // For network-latency (ms)
+  networkLossPercentage?: number; // For network-loss (0-100)
 }
 
 export interface ChaosTestResult {
