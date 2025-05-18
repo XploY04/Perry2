@@ -17,9 +17,6 @@ import {
   validateChaosResources,
   installPodDeleteExperiment,
   runPodDeleteExperiment,
-  runNetworkLatencyExperiment,
-  runNetworkLossExperiment,
-  runNetworkCorruptionExperiment,
   runDiskFillExperiment,
   runIOStressExperiment,
   runNodeIOStressExperiment,
@@ -37,9 +34,9 @@ import { promisify } from "util";
 const execAsync = promisify(exec);
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
 // Middleware
-
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
@@ -133,6 +130,82 @@ app.post("/analyze", (async (req: Request, res: Response) => {
   }
 }) as RequestHandler);
 
+// Function to run the appropriate chaos experiment
+async function runChaosExperimentByType(params: {
+  chaosType: "pod-delete" | "disk-fill" | "node-io-stress";
+  targetDeployment: string;
+  targetNamespace: string;
+  duration: number;
+  manifestPath: string;
+  fillPercentage?: number;
+  ioPercentage?: number;
+}) {
+  const {
+    chaosType,
+    targetDeployment,
+    targetNamespace,
+    duration,
+    manifestPath,
+    ioPercentage = 10,
+  } = params;
+
+  switch (chaosType) {
+    case "pod-delete":
+      return runPodDeleteExperiment({
+        targetDeployment,
+        targetNamespace,
+        chaosType: "pod-delete",
+        duration,
+        manifestPath,
+      });
+
+    case "disk-fill":
+      return runDiskFillExperiment({
+        targetDeployment,
+        targetNamespace,
+        chaosType: "disk-fill",
+        duration,
+        manifestPath,
+      });
+
+    case "node-io-stress":
+      return runNodeIOStressExperiment({
+        targetDeployment,
+        targetNamespace,
+        chaosType: "node-io-stress",
+        duration,
+        manifestPath,
+        ioBytesCount: ioPercentage * 1024 * 1024, // Convert percentage to MB
+      });
+
+    default:
+      throw new Error(`Unsupported chaos type: ${chaosType}`);
+  }
+}
+
+// Helper to extract result information from chaos result
+function extractChaosResultInfo(resultsJson: any) {
+  if (!resultsJson || !resultsJson.status) {
+    return { verdict: "Unknown", failStep: "None", valid: false };
+  }
+
+  let verdict = "Awaited";
+  let failStep = "None";
+  let valid = false;
+
+  if (resultsJson.status.experimentStatus?.verdict) {
+    verdict = resultsJson.status.experimentStatus.verdict;
+    failStep = resultsJson.status.experimentStatus.failStep || "None";
+    valid = true;
+  } else if (resultsJson.status.verdict) {
+    verdict = resultsJson.status.verdict;
+    failStep = resultsJson.status.failStep || "None";
+    valid = true;
+  }
+
+  return { verdict, failStep, valid };
+}
+
 // Chaos test endpoint
 app.post("/chaos-test", (async (
   req: Request<any, any, ChaosTestRequest>,
@@ -141,14 +214,12 @@ app.post("/chaos-test", (async (
   try {
     const {
       githubUrl,
-      chaosType = "node-io-stress", // Default to pod-delete if not specified
-      duration = 30, // Default to 30 seconds
+      chaosType = "node-io-stress",
+      duration = 30,
       targetNamespace,
       targetDeployment,
-      fillPercentage = 80, // Default disk fill percentage
-      ioPercentage = 10, // Default IO stress percentage
-      networkLatency = 200, // Default network latency in ms
-      networkLossPercentage = 10, // Default network loss percentage
+      fillPercentage = 80,
+      ioPercentage = 10,
     } = req.body;
 
     if (!githubUrl) {
@@ -161,9 +232,6 @@ app.post("/chaos-test", (async (
     // Validate chaos type
     const validChaosTypes = [
       "pod-delete",
-      "network-latency",
-      "network-loss",
-      "network-corruption",
       "disk-fill",
       "node-io-stress",
     ];
@@ -196,337 +264,112 @@ app.post("/chaos-test", (async (
       );
 
       // 4. Install LitmusChaos if not already installed
-      try {
-        await setupLitmusChaos();
-        console.log(`✅ LitmusChaos framework ready`);
-      } catch (litmusError) {
+      await setupLitmusChaos().catch((litmusError) => {
         console.error("Error setting up LitmusChaos:", litmusError);
-
-        // Try to provide detailed diagnostic information
-        let diagnosticInfo = "No additional information available";
-        try {
-          const { stdout: crdStatus } = await execAsync(
-            `kubectl get crd | grep litmuschaos.io || echo "No LitmusChaos CRDs found"`
-          );
-          const { stdout: nsStatus } = await execAsync(
-            `kubectl get ns litmus --no-headers 2>/dev/null || echo "Namespace litmus not found"`
-          );
-          const { stdout: operatorStatus } = await execAsync(
-            `kubectl get pods -n litmus --no-headers 2>/dev/null || echo "No pods in litmus namespace"`
-          );
-
-          diagnosticInfo = `CRD Status: ${crdStatus.trim()}\nNamespace Status: ${nsStatus.trim()}\nOperator Status: ${operatorStatus.trim()}`;
-        } catch (diagError) {
-          // Ignore errors in diagnostic collection
-        }
-
-        return res.status(500).json({
-          success: false,
-          error: "Failed to set up chaos testing framework",
-          details:
-            litmusError instanceof Error
-              ? litmusError.toString()
-              : String(litmusError),
-          stage: "LitmusChaos setup",
-          repository: githubUrl,
-          diagnostic: diagnosticInfo,
-        });
-      }
+        throw litmusError;
+      });
+      console.log(`✅ LitmusChaos framework ready`);
 
       // 5. Get the first deployment to target for chaos
-      const { targetDeployment, targetNamespace } =
-        await findTargetDeployment();
+      const deploymentInfo = await findTargetDeployment();
+      const finalTargetDeployment = targetDeployment || deploymentInfo.targetDeployment;
+      const finalTargetNamespace = targetNamespace || deploymentInfo.targetNamespace;
+      
       console.log(
-        `✅ Found target deployment: ${targetDeployment} in namespace ${targetNamespace}`
+        `✅ Found target deployment: ${finalTargetDeployment} in namespace ${finalTargetNamespace}`
       );
 
       // 5.5 Validate LitmusChaos resources and dependencies
       try {
-        // This function is defined in src/services/chaos.ts
         const validationResult = await validateChaosResources();
         if (!validationResult.valid) {
           console.warn(
             "⚠️ Some LitmusChaos resources are missing or invalid. Will try to continue, but this may cause issues."
           );
-          console.log(
-            "Diagnostics:",
-            JSON.stringify(validationResult.diagnostics, null, 2)
-          );
-
-          // If the service account doesn't exist, create it
+          
+          // Attempt fixes for common issues
           if (
             validationResult.diagnostics.serviceAccount &&
             !validationResult.diagnostics.serviceAccount.exists
           ) {
-            console.log(
-              "Service account 'litmus-admin' is missing. Creating it now..."
-            );
-            try {
-              await ensureLitmusChaosServiceAccount(targetNamespace);
-              console.log(
-                "✅ Successfully created litmus-admin service account"
-              );
-            } catch (saError) {
-              console.error("Error creating service account:", saError);
-            }
+            await ensureLitmusChaosServiceAccount(finalTargetNamespace);
+            console.log("✅ Created litmus-admin service account");
           }
 
-          // If the pod-delete experiment doesn't exist, try to reinstall it
           if (
             validationResult.diagnostics.podDeleteExperiment &&
             !validationResult.diagnostics.podDeleteExperiment.exists
           ) {
-            console.log("Attempting to reinstall pod-delete experiment...");
             await installPodDeleteExperiment();
+            console.log("✅ Installed pod-delete experiment");
           }
-        } else {
-          console.log("✅ All LitmusChaos resources are valid");
         }
       } catch (validationError) {
         console.error("Error validating chaos resources:", validationError);
-        // Continue anyway and hope for the best
+        // Continue anyway
       }
 
       // 6. Run chaos experiment
       const chaosManifest = join(tmpdir(), `chaos-manifest-${timestamp}.yaml`);
+      console.log(
+        `Starting chaos experiment (${chaosType}) for ${duration} seconds...`
+      );
 
-      try {
-        console.log(
-          `Starting chaos experiment (${chaosType}) for ${duration} seconds...`
-        );
+      // Run the appropriate experiment and get results
+      const resultsJson = await runChaosExperimentByType({
+        chaosType,
+        targetDeployment: finalTargetDeployment,
+        targetNamespace: finalTargetNamespace,
+        duration,
+        manifestPath: chaosManifest,
+        fillPercentage,
+        ioPercentage,
+      });
 
-        let resultsJson;
+      // Process and return the results
+      const { verdict, failStep, valid } = extractChaosResultInfo(resultsJson);
 
-        // Run the appropriate chaos experiment based on the chaosType
-        switch (chaosType) {
-          case "pod-delete":
-            resultsJson = await runPodDeleteExperiment({
-              targetDeployment,
-              targetNamespace,
-              chaosType: "pod-delete",
-              duration,
-              manifestPath: chaosManifest,
-            });
-            break;
-
-          case "network-latency":
-            resultsJson = await runNetworkLatencyExperiment({
-              targetDeployment,
-              targetNamespace,
-              chaosType: "network-latency",
-              duration,
-              manifestPath: chaosManifest,
-              networkLatency,
-            });
-            break;
-
-          case "network-loss":
-            resultsJson = await runNetworkLossExperiment({
-              targetDeployment,
-              targetNamespace,
-              chaosType: "network-loss",
-              duration,
-              manifestPath: chaosManifest,
-              networkPacketLoss: networkLossPercentage,
-            });
-            break;
-
-          case "network-corruption":
-            resultsJson = await runNetworkCorruptionExperiment({
-              targetDeployment,
-              targetNamespace,
-              chaosType: "network-corruption",
-              duration,
-              manifestPath: chaosManifest,
-            });
-            break;
-
-          case "disk-fill":
-            resultsJson = await runDiskFillExperiment({
-              targetDeployment,
-              targetNamespace,
-              chaosType: "disk-fill",
-              duration,
-              manifestPath: chaosManifest,
-            });
-            break;
-
-          case "node-io-stress":
-            resultsJson = await runNodeIOStressExperiment({
-              targetDeployment,
-              targetNamespace,
-              chaosType: "node-io-stress",
-              duration,
-              manifestPath: chaosManifest,
-              ioBytesCount: ioPercentage * 1024 * 1024, // Convert percentage to MB
-            });
-            break;
-
-          default:
-            // Fallback to generic chaos experiment
-            resultsJson = await runChaosExperiment({
-              targetDeployment,
-              targetNamespace,
-              chaosType,
-              duration,
-              manifestPath: chaosManifest,
-            });
-        }
-
-        // Check if we have a valid result with proper structure
-        const hasValidStatus =
-          resultsJson &&
-          resultsJson.status &&
-          (resultsJson.status.experimentStatus || resultsJson.status.verdict);
-
-        if (hasValidStatus) {
-          // Extract verdict from result structure
-          let verdict = "Awaited";
-          let failStep = "None";
-
-          if (
-            resultsJson.status.experimentStatus &&
-            resultsJson.status.experimentStatus.verdict
-          ) {
-            verdict = resultsJson.status.experimentStatus.verdict;
-            failStep = resultsJson.status.experimentStatus.failStep || "None";
-          } else if (resultsJson.status.verdict) {
-            verdict = resultsJson.status.verdict;
-            failStep = resultsJson.status.failStep || "None";
+      if (valid) {
+        res.json({
+          success: true,
+          message: "Chaos test completed successfully",
+          chaosType,
+          duration,
+          targetDeployment: finalTargetDeployment,
+          targetNamespace: finalTargetNamespace,
+          repository: githubUrl,
+          verdict,
+          failStep,
+          experimentStatus: "Completed",
+          result: {
+            phase: resultsJson.status?.experimentStatus?.phase || "Unknown",
+            engineStatus: resultsJson.status?.engineDetails?.engineState || "unknown",
+            podStatus: resultsJson.status?.podSearchResults || [],
+            debug: resultsJson.status?.debug || {}
           }
-
-          // 7. Return results
-          res.json({
-            success: true,
-            message: "Chaos test completed successfully",
-            chaosType,
-            duration,
-            targetDeployment,
-            targetNamespace,
-            repository: githubUrl,
-            verdict: verdict,
-            failStep: failStep,
-            experimentStatus: "Completed",
-            result: resultsJson,
-            resultSource: resultsJson.metadata?.name?.includes("engine")
-              ? "engineStatus"
-              : "chaosResult",
-            experimentPhase:
-              resultsJson.status?.experimentStatus?.phase || "Unknown",
-            additionalDiagnostics: {
-              podSearchResults: resultsJson.status?.podSearchResults,
-              nodeIOStressSpecific: resultsJson.status?.nodeIOStressSpecific,
-              availableResults: (resultsJson as any).availableResults,
-              stuckInInitialized:
-                chaosType === "node-io-stress" &&
-                resultsJson.status?.nodeIOStressSpecific?.stuckInInitialized ===
-                  true
-                  ? "The node-io-stress experiment is stuck in initialized state. This is a known issue but the experiment may still be causing stress effects."
-                  : undefined,
-              engineStatus:
-                resultsJson.status?.engineDetails?.engineState || "unknown",
-              enginePhase:
-                resultsJson.status?.experimentStatus?.phase || "unknown",
-            },
-          });
-        } else {
-          // We got a result object but it's not well-formed
-          res.json({
-            success: true,
-            message: "Chaos test executed but results may be incomplete",
-            chaosType,
-            duration,
-            targetDeployment,
-            targetNamespace,
-            repository: githubUrl,
-            verdict: "Unknown",
-            experimentStatus: "Completed with partial results",
-            resultData: resultsJson,
-          });
-        }
-      } catch (error) {
-        // Check if we have a chaos experiment that's still running
-        try {
-          const { stdout: engineList } = await execAsync(
-            `kubectl get chaosengine -n ${targetNamespace} | grep ${targetDeployment}-chaos`
-          );
-
-          if (engineList && engineList.trim()) {
-            // Try to get pod status for more diagnostic information
-            let podStatus = "";
-            try {
-              const { stdout: pods } = await execAsync(
-                `kubectl get pods -n ${targetNamespace} -l app=${targetDeployment} -o wide`
-              );
-              podStatus = pods.trim();
-            } catch (e) {
-              // Ignore if we can't get pod status
-            }
-
-            res.status(500).json({
-              success: false,
-              error:
-                "Chaos experiment is running but results couldn't be fetched",
-              details:
-                error instanceof Error ? error.toString() : String(error),
-              chaosType,
-              targetDeployment,
-              targetNamespace,
-              repository: githubUrl,
-              podStatus: podStatus,
-              message:
-                "Experiment appears to be running, but results could not be retrieved. You can check the experiment results manually using kubectl.",
-            });
-          } else {
-            // Check for any ChaosResult resources
-            try {
-              const { stdout: resultsList } = await execAsync(
-                `kubectl get chaosresults -n ${targetNamespace} --no-headers || echo "No results found"`
-              );
-
-              res.status(500).json({
-                success: false,
-                error: "Error during chaos testing",
-                details:
-                  error instanceof Error ? error.toString() : String(error),
-                chaosType,
-                targetDeployment,
-                targetNamespace,
-                repository: githubUrl,
-                availableResults: resultsList.trim(),
-              });
-            } catch (e) {
-              res.status(500).json({
-                success: false,
-                error: "Error during chaos testing",
-                details:
-                  error instanceof Error ? error.toString() : String(error),
-                chaosType,
-                targetDeployment,
-                targetNamespace,
-                repository: githubUrl,
-              });
-            }
-          }
-        } catch (e) {
-          // If we can't check for the engine, fall back to the generic error
-          res.status(500).json({
-            success: false,
-            error: "Error during chaos testing",
-            details: error instanceof Error ? error.toString() : String(error),
-            chaosType,
-            targetDeployment,
-            targetNamespace,
-            repository: githubUrl,
-          });
-        }
+        });
+      } else {
+        res.json({
+          success: true,
+          message: "Chaos test executed but results may be incomplete",
+          chaosType,
+          duration,
+          targetDeployment: finalTargetDeployment,
+          targetNamespace: finalTargetNamespace,
+          repository: githubUrl,
+          verdict: resultsJson.status?.verdict || "Unknown",
+          failStep: resultsJson.status?.failStep || "Unknown",
+          experimentStatus: "Completed with partial results",
+          debug: resultsJson.status?.debug || {}
+        });
       }
     } catch (error) {
-      // Handle specific errors from different stages
       let statusCode = 500;
       let errorMessage = "Unexpected error during chaos test";
       let errorStage = "unknown";
+      let errorDetails = error instanceof Error ? error.toString() : String(error);
 
+      // Classify the error based on error message
       if (error instanceof Error) {
         if (error.message.includes("No Kubernetes manifest files")) {
           statusCode = 400;
@@ -536,26 +379,25 @@ app.post("/chaos-test", (async (
           statusCode = 400;
           errorMessage = error.message;
           errorStage = "target deployment detection";
-        } else if (
-          error.message.includes("Failed to clone repository") ||
-          error.message.includes("git clone")
-        ) {
+        } else if (error.message.includes("Failed to clone repository") || 
+                   error.message.includes("git clone")) {
           errorMessage = "Failed to clone repository";
           errorStage = "repository cloning";
-        } else if (
-          error.message.includes("kubernetes") ||
-          error.message.includes("kind ")
-        ) {
+        } else if (error.message.includes("kubernetes") || 
+                   error.message.includes("kind ")) {
           errorStage = "kubernetes setup";
         } else if (error.message.includes("deploy")) {
           errorStage = "application deployment";
+        } else if (error.message.includes("chaos") || 
+                   error.message.includes("litmus")) {
+          errorStage = "chaos execution";
         }
       }
 
       return res.status(statusCode).json({
         success: false,
         error: errorMessage,
-        details: error instanceof Error ? error.toString() : String(error),
+        details: errorDetails,
         stage: errorStage,
         repository: githubUrl,
       });
@@ -571,7 +413,6 @@ app.post("/chaos-test", (async (
 }) as RequestHandler);
 
 // Start server
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });

@@ -521,42 +521,78 @@ export async function deployApplication(
   repoDir: string, 
   options: DeploymentOptions = {}
 ): Promise<DeploymentResult> {
-  if (options.logLevel !== 'silent') {
-    console.log("Deploying application to Kubernetes...");
-  }
+  console.log("Deploying application to Kubernetes...");
   
-  // Determine the type of application we're dealing with
+  // Find any manifest files
   const appType = await detectApplicationType(repoDir);
+  console.log(`Detected application type: ${appType}`);
+  const manifestPaths = await findManifestFiles(repoDir, appType);
   
-  if (options.logLevel === 'verbose') {
-    console.log(`Detected application type: ${appType}`);
+  if (manifestPaths.length === 0) {
+    // If no manifests found, deploy a fallback application
+    console.log("No Kubernetes manifests found, using fallback application");
+    await deployFallbackApplication();
+    
+    return {
+      success: true,
+      manifestsApplied: 1,
+      totalManifests: 1,
+      errors: [],
+      warnings: ["Used fallback application as no manifest files were found"],
+      appliedFiles: ["fallback-nginx.yaml"],
+      namespace: "default"
+    };
+  }
+
+  // Apply the manifest files
+  const namespace = options.namespace || 'default';
+  const kubectlBin = options.kubectl || 'kubectl';
+  
+  // Create namespace if needed
+  if (namespace !== 'default') {
+    try {
+      await execAsync(`${kubectlBin} get namespace ${namespace}`);
+    } catch (error) {
+      console.log(`Creating namespace ${namespace}...`);
+      await execAsync(`${kubectlBin} create namespace ${namespace}`);
+    }
   }
   
-  // Handle deployment based on application type
-  switch (appType) {
-    case 'helm':
-      return deployHelm(repoDir, options);
-      
-    case 'kustomize':
-      return deployKustomize(repoDir, options);
-      
-    case 'google-microservices':
-    case 'standard':
-    default:
-      // Find manifest files
-      const manifestPaths = await findManifestFiles(repoDir, appType);
-      
-      if (manifestPaths.length === 0) {
-        throw new Error("No valid Kubernetes manifest files found in the repository");
-      }
-      
-      if (options.logLevel === 'verbose') {
-        console.log(`Found ${manifestPaths.length} manifest files`);
-      }
-      
-      // Apply the manifests
-      return applyManifests(manifestPaths, options);
+  let appliedCount = 0;
+  const errors: Array<{ file: string; error: string }> = [];
+  const warnings: string[] = [];
+  const appliedFiles: string[] = [];
+  
+  // Apply each manifest
+  for (const filePath of manifestPaths) {
+    try {
+      console.log(`Applying manifest: ${filePath}`);
+      await execAsync(`${kubectlBin} apply -f ${filePath} --namespace=${namespace}`);
+      appliedCount++;
+      appliedFiles.push(filePath);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      errors.push({ file: filePath, error: errorMessage });
+      warnings.push(`Failed to apply manifest: ${filePath}`);
+    }
   }
+  
+  // Wait for pods to be ready
+  try {
+    await waitForPodsReadiness(namespace, { timeout: 60 });
+  } catch (error) {
+    warnings.push("Not all pods were ready within timeout period");
+  }
+  
+  return {
+    success: appliedCount > 0,
+    manifestsApplied: appliedCount,
+    totalManifests: manifestPaths.length,
+    errors,
+    warnings,
+    appliedFiles,
+    namespace
+  };
 }
 
 /**
@@ -628,24 +664,35 @@ export async function findTargetDeployment(): Promise<{ targetDeployment: string
   console.log("Finding deployment for chaos testing...");
   
   try {
-    // First check if any deployments exist
-    const deploymentCheck = await execAsync(`kubectl get deployments --all-namespaces`);
-    if (!deploymentCheck.stdout.toString().trim() || deploymentCheck.stdout.toString().includes("No resources found")) {
+    // Check if any deployments exist
+    const { stdout: deploymentList } = await execAsync(`kubectl get deployments --all-namespaces`);
+    
+    // If no deployments found, deploy the fallback application
+    if (!deploymentList.trim() || deploymentList.includes("No resources found")) {
       console.log("No deployments found. Deploying fallback sample application...");
       await deployFallbackApplication();
+      
+      return { 
+        targetDeployment: "nginx-chaos-test", 
+        targetNamespace: "default" 
+      };
     }
     
-    // Get the first deployment name
-    const deployments = await execAsync(`kubectl get deployments --all-namespaces -o jsonpath='{.items[0].metadata.name}'`);
-    const targetDeployment = deployments.stdout.toString().trim();
+    // Get the deployments using a simplified approach
+    const { stdout: jsonOutput } = await execAsync(
+      `kubectl get deployments --all-namespaces -o json`
+    );
     
-    if (!targetDeployment) {
+    const deployments = JSON.parse(jsonOutput);
+    
+    if (!deployments.items || deployments.items.length === 0) {
       throw new Error("No deployments found to run chaos testing against");
     }
     
-    // Get the namespace of the first deployment
-    const namespaceCmd = await execAsync(`kubectl get deployments --all-namespaces -o jsonpath='{.items[0].metadata.namespace}'`);
-    const targetNamespace = namespaceCmd.stdout.toString().trim() || "default";
+    // Get the first deployment
+    const firstDeployment = deployments.items[0];
+    const targetDeployment = firstDeployment.metadata.name;
+    const targetNamespace = firstDeployment.metadata.namespace || "default";
     
     console.log(`Found target deployment: ${targetDeployment} in namespace ${targetNamespace}`);
     
@@ -653,12 +700,7 @@ export async function findTargetDeployment(): Promise<{ targetDeployment: string
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`Error finding target deployment: ${errorMessage}`);
-    
-    if (errorMessage.includes("No deployments found")) {
-      throw new Error("No deployments found to run chaos testing against. Ensure your application was properly deployed.");
-    } else {
-      throw new Error(`Failed to find target deployment: ${errorMessage}`);
-    }
+    throw new Error(`Failed to find target deployment: ${errorMessage}`);
   }
 }
 

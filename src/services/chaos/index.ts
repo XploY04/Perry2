@@ -5,7 +5,6 @@ import {
   DeploymentOptions,
   DeploymentResult,
   PodChaosParams,
-  NetworkChaosParams,
   IOChaosParams,
   ChaosExperimentResult,
 } from "./types.js";
@@ -33,16 +32,7 @@ export { ensureLitmusChaosServiceAccount } from "./serviceaccount.js";
 // Export pod chaos functions
 export {
   runPodDeleteExperiment,
-  runPodKillExperiment,
-  runContainerKillExperiment,
 } from "./pod-chaos.js";
-
-// Export network chaos functions
-export {
-  runNetworkLatencyExperiment,
-  runNetworkLossExperiment,
-  runNetworkCorruptionExperiment,
-} from "./network-chaos.js";
 
 // Export IO chaos functions
 export {
@@ -65,7 +55,6 @@ export type {
   DeploymentOptions,
   DeploymentResult,
   PodChaosParams,
-  NetworkChaosParams,
   IOChaosParams,
   ChaosExperimentResult,
 };

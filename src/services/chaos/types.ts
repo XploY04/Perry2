@@ -7,7 +7,7 @@ export interface ChaosTestParams {
 export interface ChaosEngineParams {
   targetDeployment: string;
   targetNamespace: string;
-  chaosType: string;
+  chaosType: "pod-delete" | "disk-fill" | "node-io-stress";
   duration: number;
   manifestPath: string;
 }
@@ -39,13 +39,6 @@ export interface PodChaosParams extends ChaosEngineParams {
   podsAffectedPercentage?: number;
   sequence?: "serial" | "parallel";
   containerNames?: string[];
-}
-
-// Interface for Network Chaos parameters
-export interface NetworkChaosParams extends ChaosEngineParams {
-  networkLatency?: number;
-  networkPacketLoss?: number;
-  networkCorruption?: number;
 }
 
 // Interface for IO Chaos parameters
