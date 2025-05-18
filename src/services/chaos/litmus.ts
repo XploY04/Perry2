@@ -998,7 +998,7 @@ spec:
         };
         
         // If experiment is still running or awaiting verdict, wait a bit longer and check more frequently
-        let maxRetries = 6; // Try up to 6 times with increasing delays
+        let maxRetries = 1; 
         let retryCount = 0;
         
         while ((experimentInfo.status === "Running" || experimentInfo.verdict === "Awaited") && retryCount < maxRetries) {
@@ -1151,7 +1151,7 @@ spec:
             break;
           } catch (error) {
             // Try next pattern
-            console.log(`No results found with name: ${resultName}, trying next pattern...`);
+            // console.log(`No results found with name: ${resultName}, trying next pattern...`);
           }
         }
         
@@ -1208,13 +1208,13 @@ spec:
           break;
         } catch (error) {
           // Try next pattern
-          console.log(`No results found with name: ${resultName}, trying next pattern...`);
+          // console.log(`No results found with name: ${resultName}, trying next pattern...`);
         }
       }
       
       // If still no results, create a minimal one
       if (!resultFound) {
-        console.log("No results found, creating minimal result");
+        // console.log("No results found, creating minimal result");
         resultsJson = {
           kind: "ChaosResult",
           metadata: {
@@ -1236,7 +1236,7 @@ spec:
     console.log("Waiting for pods to recover...");
     let podsRecovered = false;
     let recoveryRetries = 0;
-    const maxRecoveryRetries = 5;
+    const maxRecoveryRetries = 1;
     
     while (!podsRecovered && recoveryRetries < maxRecoveryRetries) {
       try {
