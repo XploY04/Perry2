@@ -1,4 +1,4 @@
-# Perry2
+# Perry
 
 A comprehensive chaos engineering and container security analysis platform that provides vulnerability scanning and fault injection testing for Kubernetes applications.
 
